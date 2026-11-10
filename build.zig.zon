@@ -1,0 +1,12 @@
+.{
+    .name = .codex,
+    .version = "0.0.0",
+    .fingerprint = 0x727f18c50770bba3,
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .minimum_zig_version = "0.17.0",
+}
