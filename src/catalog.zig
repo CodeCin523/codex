@@ -94,11 +94,12 @@ const testing = std.testing;
 test "Catalog generates registries, exposes section, and the Def is generated" {
     const Trauma = struct {
         pub const ID = enum(u16) { _ };
-        pub const Raw = struct { desc: field.String };
+        pub const Raw = struct { name: field.Name, desc: field.String };
     };
     const Material = struct {
         pub const ID = enum(u16) { _ };
         pub const Raw = struct {
+            name: field.Name,
             density: field.Positive(f32),
             trauma: field.Ref(Trauma),
         };

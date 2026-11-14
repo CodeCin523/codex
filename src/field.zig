@@ -107,6 +107,37 @@ pub const String = struct {
     }
 };
 
+/// The entry's key: the UTF-8 name it is written, referenced (`field.Ref`), and overridden by.
+/// Every kind's `Raw` must have exactly one `Name` field (a compile error otherwise). Unlike other
+/// fields it is not stored in the `Def` — it lives in the registry's name map, read with
+/// `registry.name(id)`. The struct field may be called anything; the marker, not the name, is what
+/// counts (so `name: field.Name` is convention, not a rule).
+pub const Name = struct {
+    pub const is_codex_field = {};
+    /// Marker: this field is the kind's entry key. `nameFieldOf` finds it; `Def` omits it.
+    pub const is_name = {};
+    pub const Resolved = []const u8;
+
+    value: []const u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Name {
+        return .{ .value = try std.json.innerParse([]const u8, allocator, source, options) };
+    }
+
+    pub fn get(self: Name) []const u8 {
+        return self.value;
+    }
+
+    pub fn invalid(self: Name) ?[]const u8 {
+        _ = self;
+        return null;
+    }
+
+    pub fn resolve(self: Name, r: anytype) ![]const u8 {
+        return r.string(self.value);
+    }
+};
+
 /// Raw bytes, written as a base64 string in JSON.
 pub const Bytes = struct {
     pub const is_codex_field = {};
@@ -277,4 +308,16 @@ test "String, Ref, Tags, Bytes parse from JSON" {
     try testing.expectEqual(@as(usize, 2), r.tags.names.len);
     try testing.expectEqualStrings("b", r.tags.names[1]);
     try testing.expectEqualStrings("hi", r.data.get());
+}
+
+test "Name is a marked key field that parses like a string" {
+    try testing.expect(@hasDecl(Name, "is_codex_field"));
+    try testing.expect(@hasDecl(Name, "is_name"));
+    try testing.expectEqual([]const u8, Name.Resolved);
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const Raw = struct { name: Name };
+    const r = try parse(Raw, arena.allocator(), "{ \"name\": \"iron\" }");
+    try testing.expectEqualStrings("iron", r.name.get());
 }

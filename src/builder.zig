@@ -130,11 +130,13 @@ pub fn Builder(comptime Catalog: type) type {
             const owned_source = try arena.dupe(u8, source);
             const raws = try json.parse([]const K.Raw, arena, text, owned_path, b.problems) orelse return;
             const map = &@field(b.entries, plural);
+            const name_field = comptime def.nameFieldOf(K.Raw);
 
             for (raws) |raw| {
-                const full = try name_rules.qualify(arena, owned_package, raw.name);
+                const entry_name = @field(raw, name_field).get();
+                const full = try name_rules.qualify(arena, owned_package, entry_name);
                 if (name_rules.check(full)) |why| {
-                    try b.problems.add(owned_path, "", "the {s} name '{s}' {s}", .{ labelOf(K), raw.name, why });
+                    try b.problems.add(owned_path, "", "the {s} name '{s}' {s}", .{ labelOf(K), entry_name, why });
                     continue;
                 }
                 const slot = try map.getOrPut(b.gpa, full);
@@ -385,7 +387,7 @@ pub fn loadAgainst(comptime Catalog: type, gpa: std.mem.Allocator, io: std.Io, p
     defer b.deinit();
 
     for (packs.list) |*p| {
-        _ = try b.addPackage(p.id);
+        _ = try b.addPackage(p.name);
         const sec = p.section(Catalog.section) orelse continue;
         for (sec.object.keys(), sec.object.values()) |plural, files_val| {
             const files = switch (files_val) {
@@ -393,7 +395,7 @@ pub fn loadAgainst(comptime Catalog: type, gpa: std.mem.Allocator, io: std.Io, p
                 else => {
                     const shown = try packs.shownPath(gpa, p.folder, Packs.manifest_name);
                     defer gpa.free(shown);
-                    try problems.add(shown, p.id, "'{s}' in section '{s}' must be a list of files", .{ plural, Catalog.section });
+                    try problems.add(shown, p.name, "'{s}' in section '{s}' must be a list of files", .{ plural, Catalog.section });
                     continue;
                 },
             };
@@ -413,7 +415,7 @@ pub fn loadAgainst(comptime Catalog: type, gpa: std.mem.Allocator, io: std.Io, p
                     continue;
                 };
                 defer gpa.free(text);
-                try b.addContent(p.id, shown, file[1..], plural, text);
+                try b.addContent(p.name, shown, file[1..], plural, text);
             }
         }
     }
@@ -435,12 +437,12 @@ test "load: resolve refs across kinds in a catalog" {
     const Trauma = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "trauma";
-        pub const Raw = struct { name: []const u8, desc: f.String };
+        pub const Raw = struct { name: f.Name, desc: f.String };
     };
     const Material = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "material";
-        pub const Raw = struct { name: []const u8, density: f.Positive(f32), resist: f.Ref(Trauma) };
+        pub const Raw = struct { name: f.Name, density: f.Positive(f32), resist: f.Ref(Trauma) };
     };
     const Data = makeCatalog("content", .{ .traumas = Trauma, .materials = Material });
 
@@ -476,12 +478,12 @@ test "load: unknown ref is reported, no freeze" {
     const Trauma = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "trauma";
-        pub const Raw = struct { name: []const u8 };
+        pub const Raw = struct { name: f.Name };
     };
     const Material = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "material";
-        pub const Raw = struct { name: []const u8, resist: f.Ref(Trauma) };
+        pub const Raw = struct { name: f.Name, resist: f.Ref(Trauma) };
     };
     const Data = makeCatalog("content", .{ .traumas = Trauma, .materials = Material });
 
@@ -502,12 +504,12 @@ test "load: discovers a packs folder and loads a catalog" {
     const Trauma = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "trauma";
-        pub const Raw = struct { name: []const u8, desc: f.String };
+        pub const Raw = struct { name: f.Name, desc: f.String };
     };
     const Material = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "material";
-        pub const Raw = struct { name: []const u8, density: f.Positive(f32), resist: f.Ref(Trauma) };
+        pub const Raw = struct { name: f.Name, density: f.Positive(f32), resist: f.Ref(Trauma) };
     };
     const Data = makeCatalog("content", .{ .traumas = Trauma, .materials = Material });
 
@@ -516,7 +518,7 @@ test "load: discovers a packs folder and loads a catalog" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "core");
     try tmp.dir.writeFile(io, .{ .sub_path = "core/pack.json", .data =
-        \\{ "id": "core", "version": "1.0.0", "content": { "traumas": ["/traumas.json"], "materials": ["/materials.json"] } }
+        \\{ "name": "core", "version": "1.0.0", "content": { "traumas": ["/traumas.json"], "materials": ["/materials.json"] } }
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "core/traumas.json", .data =
         \\[ { "name": "burn", "desc": "fire damage" } ]
@@ -548,7 +550,7 @@ test "field.Path: prefix rules, normalization, and escape rejection" {
     const Look = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "look";
-        pub const Raw = struct { name: []const u8, texture: f.Path };
+        pub const Raw = struct { name: f.Name, texture: f.Path };
     };
     const Res = makeCatalog("resources", .{ .looks = Look });
 
@@ -588,7 +590,7 @@ test "override: a later pack that requires the first replaces an entry, keeping 
     const Material = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "material";
-        pub const Raw = struct { name: []const u8, density: f.Positive(f32) };
+        pub const Raw = struct { name: f.Name, density: f.Positive(f32) };
     };
     const Data = makeCatalog("content", .{ .materials = Material });
     const io = std.testing.io;
@@ -598,13 +600,13 @@ test "override: a later pack that requires the first replaces an entry, keeping 
     try tmp.dir.createDirPath(io, "core");
     try tmp.dir.createDirPath(io, "mod");
     try tmp.dir.writeFile(io, .{ .sub_path = "core/pack.json", .data =
-        \\{ "id": "core", "version": "1.0.0", "content": { "materials": ["/m.json"] } }
+        \\{ "name": "core", "version": "1.0.0", "content": { "materials": ["/m.json"] } }
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "core/m.json", .data =
         \\[ { "name": "stone", "density": 1.0 } ]
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "mod/pack.json", .data =
-        \\{ "id": "mod", "version": "1.0.0", "requires": { "core": ">=1.0.0" }, "content": { "materials": ["/m.json"] } }
+        \\{ "name": "mod", "version": "1.0.0", "requires": { "core": ">=1.0.0" }, "content": { "materials": ["/m.json"] } }
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "mod/m.json", .data =
         \\[ { "name": "core:stone", "density": 9.0 } ]
@@ -630,7 +632,7 @@ test "override: without requiring the overridden pack is a problem" {
     const Material = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "material";
-        pub const Raw = struct { name: []const u8, density: f.Positive(f32) };
+        pub const Raw = struct { name: f.Name, density: f.Positive(f32) };
     };
     const Data = makeCatalog("content", .{ .materials = Material });
     const io = std.testing.io;
@@ -640,13 +642,13 @@ test "override: without requiring the overridden pack is a problem" {
     try tmp.dir.createDirPath(io, "core");
     try tmp.dir.createDirPath(io, "mod");
     try tmp.dir.writeFile(io, .{ .sub_path = "core/pack.json", .data =
-        \\{ "id": "core", "version": "1.0.0", "content": { "materials": ["/m.json"] } }
+        \\{ "name": "core", "version": "1.0.0", "content": { "materials": ["/m.json"] } }
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "core/m.json", .data =
         \\[ { "name": "stone", "density": 1.0 } ]
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "mod/pack.json", .data =
-        \\{ "id": "mod", "version": "1.0.0", "content": { "materials": ["/m.json"] } }
+        \\{ "name": "mod", "version": "1.0.0", "content": { "materials": ["/m.json"] } }
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "mod/m.json", .data =
         \\[ { "name": "core:stone", "density": 9.0 } ]
@@ -668,7 +670,7 @@ test "tags: codex-managed search index with withTag / hasTag / select" {
     const Material = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "material";
-        pub const Raw = struct { name: []const u8, tags: f.Tags };
+        pub const Raw = struct { name: f.Name, tags: f.Tags };
     };
     const Data = makeCatalog("content", .{ .materials = Material });
 
@@ -708,12 +710,12 @@ test "against: a resource catalog resolves refs into a data catalog" {
     const Material = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "material";
-        pub const Raw = struct { name: []const u8, density: f.Positive(f32) };
+        pub const Raw = struct { name: f.Name, density: f.Positive(f32) };
     };
     const Look = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "look";
-        pub const Raw = struct { name: []const u8, material: f.Ref(Material), color: [3]u8 };
+        pub const Raw = struct { name: f.Name, material: f.Ref(Material), color: [3]u8 };
     };
     const Data = makeCatalog("content", .{ .materials = Material });
     const Resources = makeCatalog("resources", .{ .looks = Look });
@@ -748,12 +750,12 @@ test "against: a ref with no upstream catalog is reported" {
     const Material = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "material";
-        pub const Raw = struct { name: []const u8 };
+        pub const Raw = struct { name: f.Name };
     };
     const Look = struct {
         pub const ID = enum(u16) { _ };
         pub const label = "look";
-        pub const Raw = struct { name: []const u8, material: f.Ref(Material) };
+        pub const Raw = struct { name: f.Name, material: f.Ref(Material) };
     };
     const Resources = makeCatalog("resources", .{ .looks = Look });
 

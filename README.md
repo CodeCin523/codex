@@ -22,12 +22,12 @@ A pack on disk (`packs/core/`):
 
 ```jsonc
 // pack.json
-{ "id": "core", "version": "1.0.0",
+{ "name": "core", "version": "1.0.0",
   "content": { "materials": ["/materials.json"] } }
 
 // materials.json  — tags are just strings; codex collects them, no tag file to maintain
-[ { "name": "iron",  "density": 7.8, "tags": ["metal"] },
-  { "name": "water", "density": 1.0, "tags": ["liquid"] } ]
+[ { "name": "iron",  "tags": ["metal"],  "density": 7.8 },
+  { "name": "water", "tags": ["liquid"], "density": 1.0 } ]
 ```
 
 Using it:
@@ -41,9 +41,9 @@ const f = codex.field;
 const Material = struct {
     pub const ID = enum(u16) { _ };
     pub const Raw = struct {
-        name: []const u8, // the entry key
-        density: f.Positive(f32), // a JSON number, checked > 0
+        name: f.Name, // the entry key (every kind needs exactly one f.Name)
         tags: f.Tags, // free-form strings; codex interns them + builds a search index
+        density: f.Positive(f32), // a JSON number, checked > 0
     };
 };
 

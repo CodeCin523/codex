@@ -9,7 +9,7 @@
 //!             pack.json
 //!             ...
 //!
-//! Discovery is metadata only: it parses each `pack.json` for its id, version, description and
+//! Discovery is metadata only: it parses each `pack.json` for its name, version, description and
 //! `requires`, keeps the parsed manifest, and orders the packs (a pack loads after everything it
 //! requires). The content/resource sections are read later, by `Catalog.load`, from the kept
 //! manifest value. A manifest has no pack "type": it simply carries named sections (`content`,
@@ -40,7 +40,7 @@ list: []const Pack = &.{},
 reach: []const bool = &.{},
 
 pub const Pack = struct {
-    id: []const u8,
+    name: []const u8,
     version: version.Version,
     description: []const u8,
     /// The pack's folder, inside the packs folder.
@@ -113,25 +113,25 @@ pub fn discover(gpa: std.mem.Allocator, io: std.Io, path: []const u8, problems: 
             },
         };
 
-        const id = getString(obj, "id") orelse {
-            try problems.add(shown, "", "has no string 'id'", .{});
+        const name = getString(obj, "name") orelse {
+            try problems.add(shown, "", "has no string 'name'", .{});
             continue;
         };
-        if (name_rules.checkPackage(id)) |why| {
-            try problems.add(shown, "", "the pack id '{s}' {s}", .{ id, why });
+        if (name_rules.checkPackage(name)) |why| {
+            try problems.add(shown, "", "the pack name '{s}' {s}", .{ name, why });
             continue;
         }
         const ver_str = getString(obj, "version") orelse {
-            try problems.add(shown, id, "has no string 'version'", .{});
+            try problems.add(shown, name, "has no string 'version'", .{});
             continue;
         };
         const ver = version.parse(ver_str) catch {
-            try problems.add(shown, id, "the version '{s}' is not a version like 1.0.0", .{ver_str});
+            try problems.add(shown, name, "the version '{s}' is not a version like 1.0.0", .{ver_str});
             continue;
         };
 
         try found.append(a, .{
-            .id = id,
+            .name = name,
             .version = ver,
             .description = getString(obj, "description") orelse "",
             .folder = folder,
@@ -139,21 +139,21 @@ pub fn discover(gpa: std.mem.Allocator, io: std.Io, path: []const u8, problems: 
         });
     }
 
-    // Sorted by ID, so the order never depends on the file system.
+    // Sorted by name, so the order never depends on the file system.
     std.mem.sort(Pack, found.items, {}, struct {
         fn lessThan(_: void, l: Pack, r: Pack) bool {
-            return std.mem.order(u8, l.id, r.id) == .lt;
+            return std.mem.order(u8, l.name, r.name) == .lt;
         }
     }.lessThan);
     for (found.items, 0..) |p, i| if (i > 0) {
         const previous = found.items[i - 1];
-        if (std.mem.eql(u8, p.id, previous.id)) {
-            try problems.add(packs.root_path, p.id, "two packs have this id (folders {s} and {s})", .{ previous.folder, p.folder });
+        if (std.mem.eql(u8, p.name, previous.name)) {
+            try problems.add(packs.root_path, p.name, "two packs have this name (folders {s} and {s})", .{ previous.folder, p.folder });
         }
     };
 
     try packs.order(found.items, problems);
-    for (packs.list) |p| log.info("pack {s} {f} ({s})", .{ p.id, p.version, p.folder });
+    for (packs.list) |p| log.info("pack {s} {f} ({s})", .{ p.name, p.version, p.folder });
     return packs;
 }
 
@@ -163,8 +163,8 @@ pub fn deinit(packs: *Packs, io: std.Io) void {
     packs.* = undefined;
 }
 
-pub fn find(packs: *const Packs, id: []const u8) ?usize {
-    for (packs.list, 0..) |p, i| if (std.mem.eql(u8, p.id, id)) return i;
+pub fn find(packs: *const Packs, name: []const u8) ?usize {
+    for (packs.list, 0..) |p, i| if (std.mem.eql(u8, p.name, name)) return i;
     return null;
 }
 
@@ -206,34 +206,34 @@ fn order(packs: *Packs, found: []Pack, problems: *Problems) !void {
     for (found, 0..) |p, i| {
         const shown = try packs.shownPath(a, p.folder, manifest_name);
         const req = requiresOf(p) orelse continue;
-        for (req.keys(), req.values()) |id, range_val| {
+        for (req.keys(), req.values()) |req_name, range_val| {
             const range = switch (range_val) {
                 .string => |s| s,
                 else => {
-                    try problems.add(shown, p.id, "the version range for {s} must be a string", .{id});
+                    try problems.add(shown, p.name, "the version range for {s} must be a string", .{req_name});
                     continue;
                 },
             };
             const j = for (found, 0..) |q, j| {
-                if (std.mem.eql(u8, q.id, id)) break j;
+                if (std.mem.eql(u8, q.name, req_name)) break j;
             } else {
-                try problems.add(shown, p.id, "requires pack {s}, which is not there", .{id});
+                try problems.add(shown, p.name, "requires pack {s}, which is not there", .{req_name});
                 continue;
             };
             if (i == j) {
-                try problems.add(shown, p.id, "requires itself", .{});
+                try problems.add(shown, p.name, "requires itself", .{});
                 continue;
             }
             const ok = version.satisfies(found[j].version, range) catch {
-                try problems.add(shown, p.id, "the version range '{s}' for {s} is not valid (e.g. \">=1.0.0 <2.0.0\")", .{ range, id });
+                try problems.add(shown, p.name, "the version range '{s}' for {s} is not valid (e.g. \">=1.0.0 <2.0.0\")", .{ range, req_name });
                 continue;
             };
-            if (!ok) try problems.add(shown, p.id, "requires {s} {s}, but it is version {f}", .{ id, range, found[j].version });
+            if (!ok) try problems.add(shown, p.name, "requires {s} {s}, but it is version {f}", .{ req_name, range, found[j].version });
             edges[i * n + j] = true;
         }
     }
 
-    // Repeatedly take the first pack (by ID) whose requirements are all placed.
+    // Repeatedly take the first pack (by name) whose requirements are all placed.
     const placed = try a.alloc(bool, n);
     @memset(placed, false);
     const position = try a.alloc(usize, n);
@@ -251,7 +251,7 @@ fn order(packs: *Packs, found: []Pack, problems: *Problems) !void {
         try list.append(a, found[next]);
     }
     for (found, 0..) |p, i| if (!placed[i]) {
-        try problems.add(try packs.shownPath(a, p.folder, manifest_name), p.id, "is part of a circle of packs requiring each other", .{});
+        try problems.add(try packs.shownPath(a, p.folder, manifest_name), p.name, "is part of a circle of packs requiring each other", .{});
     };
 
     // Indirect requirements, in load order.
@@ -289,12 +289,12 @@ test "discover: orders packs by requires" {
     try writeTmp(&tmp,
         \\core/pack.json
     ,
-        \\{ "id": "core", "version": "1.2.0", "content": { "materials": ["/materials.json"] } }
+        \\{ "name": "core", "version": "1.2.0", "content": { "materials": ["/materials.json"] } }
     );
     try writeTmp(&tmp,
         \\mod/pack.json
     ,
-        \\{ "id": "mod", "version": "0.1.0", "requires": { "core": ">=1.0.0" } }
+        \\{ "name": "mod", "version": "0.1.0", "requires": { "core": ">=1.0.0" } }
     );
 
     const path = try std.fs.path.join(t_gpa, &.{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
@@ -308,8 +308,8 @@ test "discover: orders packs by requires" {
     try testing.expectEqual(@as(usize, 0), problems.count());
     try testing.expectEqual(@as(usize, 2), packs.list.len);
     // core loads before mod, because mod requires core.
-    try testing.expectEqualStrings("core", packs.list[0].id);
-    try testing.expectEqualStrings("mod", packs.list[1].id);
+    try testing.expectEqualStrings("core", packs.list[0].name);
+    try testing.expectEqualStrings("mod", packs.list[1].name);
     try testing.expect(packs.requires("mod", "core"));
     try testing.expect(!packs.requires("core", "mod"));
 
@@ -325,7 +325,7 @@ test "discover: reports a missing requirement" {
     try writeTmp(&tmp,
         \\mod/pack.json
     ,
-        \\{ "id": "mod", "version": "1.0.0", "requires": { "core": ">=1.0.0" } }
+        \\{ "name": "mod", "version": "1.0.0", "requires": { "core": ">=1.0.0" } }
     );
 
     const path = try std.fs.path.join(t_gpa, &.{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });

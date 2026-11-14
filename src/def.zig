@@ -14,11 +14,32 @@
 
 const std = @import("std");
 
-/// The resolved (`Def`) type for a kind written as `Raw`.
-/// The resolved type for a kind written as `Raw`. The special `name` field (the entry key — kept in
-/// the registry's name map, qualified, not in the `Def`) is omitted. Used by `Registry`.
+/// The resolved type for a kind written as `Raw`. The `field.Name` key (kept in the registry's name
+/// map, qualified, not in the `Def`) is omitted; every kind must have exactly one. Used by `Registry`.
 pub fn KindDef(comptime Raw: type) type {
+    _ = nameFieldOf(Raw); // every kind must declare exactly one field.Name key
     return structDef(Raw, true);
+}
+
+/// Whether `T` is the `field.Name` key type (a container declaring `is_name`).
+pub fn isNameField(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, "is_name"),
+        else => false,
+    };
+}
+
+/// The name of the one `field.Name` field in `Raw`. A compile error if there is not exactly one —
+/// codex keys every entry by a `field.Name` (see `field.Name`).
+pub fn nameFieldOf(comptime Raw: type) [:0]const u8 {
+    const info = @typeInfo(Raw).@"struct";
+    var found: ?[:0]const u8 = null;
+    for (info.field_names, info.field_types) |fname, ftype| {
+        if (!isNameField(ftype)) continue;
+        if (found != null) @compileError("codex: " ++ @typeName(Raw) ++ " has more than one codex.field.Name field");
+        found = fname;
+    }
+    return found orelse @compileError("codex: " ++ @typeName(Raw) ++ " has no codex.field.Name field (every kind needs one `name: codex.field.Name` key)");
 }
 
 /// The resolved type for any `Raw`-shaped type, including nested composites (nothing omitted).
@@ -59,7 +80,7 @@ fn structDef(comptime T: type, comptime skip_name: bool) type {
         var attrs: [info.field_names.len]std.lang.Type.Struct.FieldAttributes = @splat(.{});
         var n: usize = 0;
         for (info.field_names, info.field_types) |fname, ftype| {
-            if (skip_name and std.mem.eql(u8, fname, "name")) continue;
+            if (skip_name and isNameField(ftype)) continue;
             names[n] = fname;
             types[n] = Resolved(ftype);
             n += 1;
@@ -69,7 +90,7 @@ fn structDef(comptime T: type, comptime skip_name: bool) type {
 }
 
 
-/// Fills a `KindDef(Raw)` from a parsed kind `Raw`, skipping the `name` key. See `build`.
+/// Fills a `KindDef(Raw)` from a parsed kind `Raw`, skipping the `field.Name` key. See `build`.
 pub fn buildKind(comptime Raw: type, raw: Raw, r: anytype) !KindDef(Raw) {
     return buildStruct(Raw, raw, r, true);
 }
@@ -105,7 +126,7 @@ fn resolveField(comptime T: type, value: T, r: anytype) !Resolved(T) {
 fn buildStruct(comptime T: type, value: T, r: anytype, comptime skip_name: bool) !structDef(T, skip_name) {
     var out: structDef(T, skip_name) = undefined;
     inline for (@typeInfo(T).@"struct".field_names) |fname| {
-        if (skip_name and comptime std.mem.eql(u8, fname, "name")) continue;
+        if (skip_name and comptime isNameField(@FieldType(T, fname))) continue;
         r.field = fname;
         @field(out, fname) = try resolveField(@FieldType(T, fname), @field(value, fname), r);
     }
