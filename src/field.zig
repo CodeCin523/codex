@@ -72,6 +72,12 @@ fn Checked(comptime T: type, comptime Rule: type) type {
             return self.value;
         }
 
+        /// A literal value, for a `Raw` field default (`= .of(1.0)`) or a reserved entry. Still
+        /// validated at freeze like any value.
+        pub fn of(v: T) Self {
+            return .{ .value = v };
+        }
+
         /// Validate (reporting through `r` on failure) and return the value. `r` prepends the
         /// current entry and field, so the reason stays short and value-free here.
         pub fn resolve(self: Self, r: anytype) !T {
@@ -95,6 +101,11 @@ pub const String = struct {
 
     pub fn get(self: String) []const u8 {
         return self.value;
+    }
+
+    /// A literal value, for a `Raw` field default (`= .of("none")`) or a reserved entry.
+    pub fn of(s: []const u8) String {
+        return .{ .value = s };
     }
 
     pub fn invalid(self: String) ?[]const u8 {
@@ -128,6 +139,11 @@ pub const Name = struct {
         return self.value;
     }
 
+    /// A literal name (reserved entries key themselves by their `ID` member name through this).
+    pub fn of(s: []const u8) Name {
+        return .{ .value = s };
+    }
+
     pub fn invalid(self: Name) ?[]const u8 {
         _ = self;
         return null;
@@ -158,6 +174,11 @@ pub const Bytes = struct {
         return self.value;
     }
 
+    /// A literal value (already-decoded bytes), for a `Raw` field default or a reserved entry.
+    pub fn of(b: []const u8) Bytes {
+        return .{ .value = b };
+    }
+
     pub fn resolve(self: Bytes, r: anytype) ![]const u8 {
         return r.string(self.value);
     }
@@ -176,6 +197,11 @@ pub fn Ref(comptime Kind: type) type {
 
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
             return .{ .name = try std.json.innerParse([]const u8, allocator, source, options) };
+        }
+
+        /// A literal reference by name, for a `Raw` field default or a reserved entry.
+        pub fn of(nm: []const u8) @This() {
+            return .{ .name = nm };
         }
 
         pub fn resolve(self: @This(), r: anytype) !Kind.ID {
@@ -198,6 +224,11 @@ pub const Tags = struct {
         return .{ .names = try std.json.innerParse([]const []const u8, allocator, source, options) };
     }
 
+    /// A literal tag set, for a `Raw` field default (`= .of(&.{})`) or a reserved entry.
+    pub fn of(ns: []const []const u8) Tags {
+        return .{ .names = ns };
+    }
+
     pub fn resolve(self: Tags, r: anytype) ![]const tags.Id {
         const out = try r.allocator.alloc(tags.Id, self.names.len);
         for (self.names, out) |nm, *o| o.* = try r.tag(nm);
@@ -218,6 +249,11 @@ pub const Path = struct {
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Path {
         return .{ .raw = try std.json.innerParse([]const u8, allocator, source, options) };
+    }
+
+    /// A literal path, for a `Raw` field default or a reserved entry. Normalized at freeze.
+    pub fn of(p: []const u8) Path {
+        return .{ .raw = p };
     }
 
     pub fn resolve(self: Path, r: anytype) ![]const u8 {
@@ -320,4 +356,28 @@ test "Name is a marked key field that parses like a string" {
     const Raw = struct { name: Name };
     const r = try parse(Raw, arena.allocator(), "{ \"name\": \"iron\" }");
     try testing.expectEqualStrings("iron", r.name.get());
+}
+
+test "field defaults: `.of` makes a wrapped field optional in JSON" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const Raw = struct {
+        density: Positive(f32) = .of(1.0),
+        label: String = .of("none"),
+        flow: Range(f32, 0, 1) = .of(0.5),
+    };
+
+    // A present value wins over the default.
+    const given = try parse(Raw, a, "{ \"density\": 2.5, \"label\": \"iron\", \"flow\": 0.2 }");
+    try testing.expectEqual(@as(f32, 2.5), given.density.get());
+    try testing.expectEqualStrings("iron", given.label.get());
+    try testing.expectEqual(@as(f32, 0.2), given.flow.get());
+
+    // An absent field falls back to the `.of` default (std.json's native behavior).
+    const empty = try parse(Raw, a, "{}");
+    try testing.expectEqual(@as(f32, 1.0), empty.density.get());
+    try testing.expectEqualStrings("none", empty.label.get());
+    try testing.expectEqual(@as(f32, 0.5), empty.flow.get());
 }

@@ -25,6 +25,7 @@ test {
     _ = @import("name.zig");
     _ = @import("json.zig");
     _ = @import("field.zig");
+    _ = @import("reserved.zig");
     _ = @import("def.zig");
     _ = @import("registry.zig");
     _ = @import("catalog.zig");

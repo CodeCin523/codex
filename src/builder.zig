@@ -21,6 +21,7 @@ const name_rules = @import("name.zig");
 const Problems = @import("Problems.zig");
 const Packs = @import("packs.zig");
 const tags = @import("tags.zig");
+const reserved = @import("reserved.zig");
 
 const log = std.log.scoped(.codex);
 
@@ -187,6 +188,8 @@ pub fn Builder(comptime Catalog: type) type {
 
             inline for (plurals) |plural| {
                 const K = Catalog.KindOf(plural);
+                const Reg = registry.Registry(K);
+                const R = Reg.reserved_count;
                 const map = &@field(b.entries, plural);
                 const reg = &@field(catalog.regs, plural);
                 const n = map.count();
@@ -195,19 +198,33 @@ pub fn Builder(comptime Catalog: type) type {
                 if (n > max) {
                     try b.problems.add("", "", "there are {d} {s} entries, more than the {d} allowed", .{ n, plural, max });
                 } else {
-                    const Def = registry.Registry(K).Def;
-                    const defs = try a.alloc(Def, n);
-                    const entry_packages = try a.alloc([]const u8, n);
-                    try reg.names.ensureTotalCapacity(a, n);
+                    const Def = Reg.Def;
+                    const defs = try a.alloc(Def, R + n);
+                    const entry_packages = try a.alloc([]const u8, R + n);
+                    try reg.names.ensureTotalCapacity(a, R + n);
 
+                    // Reserved slots (ids 0..R-1): dense, game-owned placeholders so `get` is total.
+                    comptime if (@hasDecl(K, "reserved")) {
+                        for (@typeInfo(@TypeOf(K.reserved)).@"struct".field_names) |mn|
+                            if (!@hasField(K.ID, mn)) @compileError("codex: " ++ @typeName(K) ++
+                                ".reserved has member '" ++ mn ++ "' that is not a reserved id in its ID enum");
+                    };
+                    inline for (Reg.reserved_names, 0..) |mname, slot| {
+                        reg.names.putAssumeCapacityNoClobber(try a.dupe(u8, mname), {});
+                        entry_packages[slot] = ""; // game-owned, not from any pack
+                        const vals = if (@hasDecl(K, "reserved") and @hasField(@TypeOf(K.reserved), mname)) @field(K.reserved, mname) else .{};
+                        defs[slot] = try b.buildReserved(K, mname, vals, &r);
+                    }
+
+                    // Loaded entries get the ids past the reserved slots.
                     for (map.keys(), map.values(), 0..) |full, entry, i| {
                         reg.names.putAssumeCapacityNoClobber(try a.dupe(u8, full), {});
-                        entry_packages[i] = packages[indexOf(b.packages.items, entry.package)];
+                        entry_packages[R + i] = packages[indexOf(b.packages.items, entry.package)];
                         r.focus(K, i);
                         var d = try def.buildKind(K.Raw, entry.raw, &r);
                         r.field = "";
                         if (@hasDecl(K, "resolve")) try K.resolve(&r, &d);
-                        defs[i] = d;
+                        defs[R + i] = d;
                     }
 
                     reg.defs = defs;
@@ -235,6 +252,23 @@ pub fn Builder(comptime Catalog: type) type {
             unreachable;
         }
 
+        /// Builds the placeholder `Def` for one reserved slot from its `Init` value (the reserved
+        /// member, or all-defaults). The entry is keyed by its member name and resolved leniently —
+        /// a reserved sentinel is game-owned, so its field values are not reported as problems.
+        fn buildReserved(b: *Self, comptime K: type, comptime member: [:0]const u8, vals: anytype, r: *Resolver) !registry.Registry(K).Def {
+            _ = b;
+            const raw = reserved.buildRaw(K, member, vals);
+            r.lenient = true;
+            defer r.lenient = false;
+            r.package = "";
+            r.path = "";
+            r.source = "";
+            r.subject = member;
+            r.index = 0;
+            r.field = "";
+            return def.buildKind(K.Raw, raw, r);
+        }
+
         /// What a kind's `resolve` (and the field types) get: turns names into IDs, checks values,
         /// and records problems against the entry they come from. Problems do not stop resolving, so
         /// all are found at once.
@@ -246,6 +280,9 @@ pub fn Builder(comptime Catalog: type) type {
             external: ?External = null,
             /// The catalog's interned tag table; `field.Tags` adds to it as entries use tags.
             tag_table: *tags.Table = undefined,
+            /// When set, `fail` is a no-op: used while building game-owned reserved placeholders,
+            /// whose field values are not pack data and so are not reported as problems.
+            lenient: bool = false,
             // The entry being resolved.
             package: []const u8 = "",
             path: []const u8 = "",
@@ -260,7 +297,8 @@ pub fn Builder(comptime Catalog: type) type {
                 const full = try name_rules.qualify(r.builder.arena.allocator(), r.package, nm);
                 if (comptime hasKind(Catalog, K)) {
                     const map = &@field(r.builder.entries, Catalog.pluralOf(K));
-                    if (map.getIndex(full)) |i| return @enumFromInt(@as(u16, @intCast(i)));
+                    // Entry index + the kind's reserved slots = its final id.
+                    if (map.getIndex(full)) |i| return @enumFromInt(@as(u16, @intCast(registry.Registry(K).reserved_count + i)));
                 } else {
                     // A ref to a kind not in this catalog: resolve against the upstream catalogs.
                     const idx = if (r.external) |ext| ext.lookup(ext.ctx, @typeName(K), full) else null;
@@ -341,6 +379,7 @@ pub fn Builder(comptime Catalog: type) type {
 
             /// Records a problem against the current entry, prefixed with the current field.
             pub fn fail(r: *Resolver, comptime fmt: []const u8, args: anytype) !void {
+                if (r.lenient) return; // reserved placeholders are game-owned, not validated
                 if (r.field.len > 0) {
                     const detail = try std.fmt.allocPrint(r.allocator, fmt, args);
                     try r.builder.problems.add(r.path, r.subject, "{s} {s}", .{ r.field, detail });
@@ -356,7 +395,7 @@ pub fn Builder(comptime Catalog: type) type {
 
             /// The ID of the entry being resolved.
             pub fn current(r: *const Resolver, comptime K: type) K.ID {
-                return @enumFromInt(@as(u16, @intCast(r.index)));
+                return @enumFromInt(@as(u16, @intCast(registry.Registry(K).reserved_count + r.index)));
             }
 
             fn focus(r: *Resolver, comptime K: type, index: usize) void {
@@ -768,4 +807,170 @@ test "against: a ref with no upstream catalog is reported" {
     );
     try testing.expectError(error.InvalidCatalog, br.freeze(testing.allocator));
     try testing.expect(problems.count() >= 1);
+}
+
+test "reserved: named ID members reserve dense slots; get is total, find/name/count skip them" {
+    const f = field;
+    const Material = struct {
+        pub const ID = enum(u16) { none = 0, air = 1, _ };
+        pub const label = "material";
+        pub const Raw = struct {
+            name: f.Name,
+            density: f.Positive(f32) = .of(1.0),
+        };
+        // A plain comptime struct — no annotation; `density` takes the Raw default for `none`,
+        // and a plain value (codex wraps it) for `air`.
+        pub const reserved = .{
+            .none = .{},
+            .air = .{ .density = 0.001 },
+        };
+    };
+    const Data = makeCatalog("content", .{ .materials = Material });
+
+    var problems: Problems = .init(testing.allocator);
+    defer problems.deinit();
+    var b: Builder(Data) = .init(testing.allocator, &problems);
+    defer b.deinit();
+    try b.addContent("core", "m.json", "m.json", "materials",
+        \\[ { "name": "stone", "density": 2.5 }, { "name": "dirt", "density": 1.5 } ]
+    );
+    var data = try b.freeze(testing.allocator);
+    defer data.deinit();
+
+    const M = data.registry(Material);
+
+    // count() includes the reserved slots; ids run 0..count().
+    try testing.expectEqual(@as(usize, 4), M.count()); // none, air, stone, dirt
+
+    // get(reserved) returns a placeholder — reads stay total, even for `none`/`air`.
+    try testing.expectEqual(@as(f32, 1.0), M.get(.none).density);
+    try testing.expectEqual(@as(f32, 0.001), M.get(.air).density);
+
+    // Loaded entries get the ids past the reserved slots (2 and 3).
+    const stone = M.find("core:stone").?;
+    const dirt = M.find("core:dirt").?;
+    try testing.expectEqual(@as(u16, 2), @intFromEnum(stone));
+    try testing.expectEqual(@as(u16, 3), @intFromEnum(dirt));
+    try testing.expectEqual(@as(f32, 2.5), M.get(stone).density);
+
+    // find is the inverse of name and works on reserved ids (by their bare member name).
+    try testing.expectEqual(Material.ID.none, M.find("none").?);
+    try testing.expectEqual(Material.ID.air, M.find("air").?);
+    try testing.expectEqual(@as(?Material.ID, null), M.find("core:none")); // qualified != reserved
+    try testing.expectEqualStrings("none", M.name(.none));
+    try testing.expectEqualStrings("air", M.name(.air));
+    try testing.expectEqualStrings("core:stone", M.name(stone));
+
+    // Iteration via at(i) walks reserved slots first, then the loaded entries.
+    try testing.expectEqual(Material.ID.none, M.at(0));
+    try testing.expectEqual(Material.ID.air, M.at(1));
+    try testing.expectEqual(stone, M.at(2));
+    try testing.expectEqual(dirt, M.at(3));
+    try testing.expect(M.isReserved(.none));
+    try testing.expect(!M.isReserved(stone));
+}
+
+test "reserved: a kind with no `reserved` decl gets all-default placeholders" {
+    const f = field;
+    const Material = struct {
+        pub const ID = enum(u16) { none = 0, _ };
+        pub const label = "material";
+        pub const Raw = struct { name: f.Name, density: f.Positive(f32) = .of(2.0) };
+    };
+    const Data = makeCatalog("content", .{ .materials = Material });
+
+    var problems: Problems = .init(testing.allocator);
+    defer problems.deinit();
+    var b: Builder(Data) = .init(testing.allocator, &problems);
+    defer b.deinit();
+    try b.addContent("core", "m.json", "m.json", "materials",
+        \\[ { "name": "stone", "density": 2.5 } ]
+    );
+    var data = try b.freeze(testing.allocator);
+    defer data.deinit();
+
+    const M = data.registry(Material);
+    try testing.expectEqual(@as(usize, 2), M.count()); // none + stone
+    try testing.expectEqual(@as(f32, 2.0), M.get(.none).density); // Raw default fills the placeholder
+    try testing.expectEqual(@as(u16, 1), @intFromEnum(M.find("core:stone").?)); // past none(0)
+}
+
+test "reserved: refs to a kind with reserved ids resolve to the right slot" {
+    const f = field;
+    const Material = struct {
+        pub const ID = enum(u16) { none = 0, air = 1, _ };
+        pub const label = "material";
+        pub const Raw = struct { name: f.Name, density: f.Positive(f32) = .of(1.0) };
+        pub const reserved = .{ .none = .{}, .air = .{} };
+    };
+    const Recipe = struct {
+        pub const ID = enum(u16) { _ };
+        pub const label = "recipe";
+        pub const Raw = struct { name: f.Name, out: f.Ref(Material) };
+    };
+    const Data = makeCatalog("content", .{ .materials = Material, .recipes = Recipe });
+
+    var problems: Problems = .init(testing.allocator);
+    defer problems.deinit();
+    var b: Builder(Data) = .init(testing.allocator, &problems);
+    defer b.deinit();
+    try b.addContent("core", "m.json", "m.json", "materials",
+        \\[ { "name": "stone", "density": 2.5 } ]
+    );
+    try b.addContent("core", "r.json", "r.json", "recipes",
+        \\[ { "name": "make_stone", "out": "stone" } ]
+    );
+    var data = try b.freeze(testing.allocator);
+    defer data.deinit();
+
+    const recipe = data.registry(Recipe).find("core:make_stone").?;
+    const stone = data.registry(Material).find("core:stone").?;
+    try testing.expectEqual(@as(u16, 2), @intFromEnum(stone)); // past none(0)/air(1)
+    try testing.expectEqual(stone, data.registry(Recipe).get(recipe).out);
+}
+
+test "reserved: a reserved entry can carry tags, interned and indexed like any entry" {
+    const f = field;
+    const Material = struct {
+        pub const ID = enum(u16) { none = 0, air = 1, _ };
+        pub const label = "material";
+        pub const Raw = struct {
+            name: f.Name,
+            tags: f.Tags,
+            density: f.Positive(f32) = .of(1.0),
+        };
+        pub const reserved = .{
+            .none = .{},
+            .air = .{ .density = 0.001, .tags = &.{ "gas", "breathable" } },
+        };
+    };
+    const Data = makeCatalog("content", .{ .materials = Material });
+
+    var problems: Problems = .init(testing.allocator);
+    defer problems.deinit();
+    var b: Builder(Data) = .init(testing.allocator, &problems);
+    defer b.deinit();
+    try b.addContent("core", "m.json", "m.json", "materials",
+        \\[ { "name": "iron", "tags": ["metal"], "density": 7.8 } ]
+    );
+    var data = try b.freeze(testing.allocator);
+    defer data.deinit();
+
+    const M = data.registry(Material);
+    const gas = data.tag("gas").?;
+    const breathable = data.tag("breathable").?;
+    const metal = data.tag("metal").?;
+
+    // air's tags are interned, stored on its placeholder, and in the search index.
+    try testing.expect(M.hasTag(.air, gas));
+    try testing.expect(M.hasTag(.air, breathable));
+    try testing.expect(!M.hasTag(.air, metal));
+    try testing.expectEqual(@as(usize, 1), M.withTag(gas).len);
+    try testing.expectEqual(Material.ID.air, M.withTag(gas)[0]);
+
+    // none set no tags; a loaded entry keeps its own.
+    try testing.expect(!M.hasTag(.none, gas));
+    const iron = M.find("core:iron").?;
+    try testing.expect(M.hasTag(iron, metal));
+    try testing.expect(!M.hasTag(iron, gas));
 }

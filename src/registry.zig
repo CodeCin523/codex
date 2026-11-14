@@ -7,6 +7,7 @@
 const std = @import("std");
 const def = @import("def.zig");
 const tags = @import("tags.zig");
+const reserved = @import("reserved.zig");
 
 pub fn Registry(comptime K: type) type {
     return struct {
@@ -16,6 +17,12 @@ pub fn Registry(comptime K: type) type {
         pub const ID = K.ID;
         /// The resolved entry, generated from the kind's `Raw` (the `name` key is not stored here).
         pub const Def = def.KindDef(K.Raw);
+
+        /// How many low ids this kind reserves for the game (named members of `K.ID`). Loaded pack
+        /// entries get the ids past them. `0` for a plain `enum(u16) { _ }`.
+        pub const reserved_count = reserved.count(K.ID);
+        /// Reserved member names, indexed by id value (`reserved_names[0]` is the member valued `0`).
+        pub const reserved_names = reserved.names(K.ID);
 
         /// The name of this kind's `field.Tags` field, if it has one.
         pub const tag_field = tagFieldOf(K);
@@ -34,6 +41,9 @@ pub fn Registry(comptime K: type) type {
         tag_bits: []const usize = &.{},
         tag_words: usize = 0,
 
+        /// The number of entries, reserved slots included. Ids run `0..count()`; the first
+        /// `reserved_count` are the reserved slots, then the loaded entries. Iterate with `at`, and
+        /// use `isReserved` to skip the reserved ones if you only want loaded content.
         pub fn count(r: *const Self) usize {
             return r.defs.len;
         }
@@ -42,7 +52,23 @@ pub fn Registry(comptime K: type) type {
             return &r.defs[@intFromEnum(id)];
         }
 
-        /// The entry called `full_name` (`package:thing`). Meant for loading and debugging.
+        /// Whether `id` is a reserved (game-owned) slot rather than a loaded entry.
+        pub fn isReserved(r: *const Self, id: ID) bool {
+            _ = r;
+            return @intFromEnum(id) < reserved_count;
+        }
+
+        /// The id of the `i`-th entry, `i` in `0..count()`: reserved slots first, then loaded ones.
+        pub fn at(r: *const Self, i: usize) ID {
+            _ = r;
+            return @enumFromInt(@as(u16, @intCast(i)));
+        }
+
+        /// The id of the entry called `full_name`, or null if there is none. For a loaded entry that
+        /// is `package:thing`; for a reserved slot it is the bare `ID` member name (`"none"`), so
+        /// `find` is the inverse of `name` and works on reserved ids too. (Pack entries are always
+        /// qualified, so they never collide with a bare reserved name, and `field.Ref` resolution
+        /// uses qualified names, so this does not let a pack reference a reserved sentinel.)
         pub fn find(r: *const Self, full_name: []const u8) ?ID {
             const index = r.names.getIndex(full_name) orelse return null;
             return @enumFromInt(@as(u16, @intCast(index)));
@@ -97,7 +123,7 @@ pub fn Registry(comptime K: type) type {
                 for (rarest) |id| if (r.matches(id, query)) try result.append(allocator, id);
             } else {
                 for (0..r.count()) |i| {
-                    const id: ID = @enumFromInt(@as(u16, @intCast(i)));
+                    const id = r.at(i);
                     if (r.matches(id, query)) try result.append(allocator, id);
                 }
             }
@@ -124,13 +150,14 @@ fn tagFieldOf(comptime K: type) ?[:0]const u8 {
 /// Builds the tag search index for a tagged registry. `tag_count` is the catalog's total tags.
 pub fn buildTagIndex(comptime K: type, reg: *Registry(K), tag_count: usize, a: std.mem.Allocator) !void {
     const Self = Registry(K);
-    const n = reg.count();
+    // Indexed by raw id, so reserved slots get a (tag-free) row too and `hasTag` indexes directly.
+    const slots = reg.defs.len;
     const words = std.math.divCeil(usize, tag_count, @bitSizeOf(usize)) catch unreachable;
-    const bits = try a.alloc(usize, n * words);
+    const bits = try a.alloc(usize, slots * words);
     @memset(bits, 0);
     const counts = try a.alloc(usize, tag_count);
     @memset(counts, 0);
-    for (0..n) |i| {
+    for (0..slots) |i| {
         const id: Self.ID = @enumFromInt(@as(u16, @intCast(i)));
         for (reg.tagsOf(id)) |t| {
             const bit = @intFromEnum(t);
@@ -149,7 +176,7 @@ pub fn buildTagIndex(comptime K: type, reg: *Registry(K), tag_count: usize, a: s
         list.* = all[start..][0..0];
         start += c;
     }
-    for (0..n) |i| {
+    for (0..slots) |i| {
         const id: Self.ID = @enumFromInt(@as(u16, @intCast(i)));
         for (reg.tagsOf(id)) |t| {
             const slot = &by_tag[@intFromEnum(t)];
